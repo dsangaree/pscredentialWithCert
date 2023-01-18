@@ -30,6 +30,9 @@ $Cred = Get-SmartCardCred
 
 .NOTES
 Author: Joshua Chase
+Last Modified: 13 January 2023 by Daniel Sangaree (dsangaree) and Elliot Fox (elfox-io)
+-Removed X509Certificate2 usage in C# to make compatible with Powershell 7/.NET Core
+-Added filtering to remove expired certs and filter by cert FriendlyName
 Last Modified: 21 Juni 2021 by Sebastian Bammer-Tasch
 Changed a few lines so the code works without UI directly from a (reverse) shell
 Last Modified: 01 August 2018
@@ -37,7 +40,13 @@ C# code used from https://github.com/bongiovimatthew-microsoft/pscredentialWithC
 
 #>
 [cmdletbinding()]
-param()
+param(
+    [Parameter(HelpMessage="Show All Available Certs")]
+    [switch]$All = $False
+)
+
+    # Filters out expired certs by default; can optionally filter by string, as well
+    $CertFilterString = "*"
 
     $SmartCardCode = @"
 // Copyright (c) Microsoft Corporation. All rights reserved.
@@ -95,7 +104,6 @@ namespace SmartCardLogon{
             //
             // Locate the certificate in the certificate store 
             //
-            X509Certificate2 certCredential = new X509Certificate2();
             X509Store userMyStore = new X509Store(StoreName.My, StoreLocation.CurrentUser);
             userMyStore.Open(OpenFlags.ReadOnly);
             X509Certificate2Collection certsReturned = userMyStore.Certificates.Find(X509FindType.FindByThumbprint, thumbprint, false);
@@ -109,8 +117,7 @@ namespace SmartCardLogon{
             //
             // Marshal the certificate 
             //
-            certCredential = certsReturned[0];
-            certInfo.rgbHashOfCert = certCredential.GetCertHash();
+            certInfo.rgbHashOfCert = certsReturned[0].GetCertHash();
             int size = Marshal.SizeOf(certInfo);
             IntPtr pCertInfo = Marshal.AllocHGlobal(size);
             Marshal.StructureToPtr(certInfo, pCertInfo, false);
@@ -125,7 +132,7 @@ namespace SmartCardLogon{
                 certBlobForUsername = Marshal.PtrToStringUni(marshaledCredential);
                 psCreds = new PSCredential(certBlobForUsername, pin);
             }
-
+            
             Marshal.FreeHGlobal(pCertInfo);
             if (marshaledCredential != IntPtr.Zero)
             {
@@ -140,15 +147,25 @@ namespace SmartCardLogon{
 
     Add-Type -TypeDefinition $SmartCardCode -Language CSharp
     Add-Type -AssemblyName System.Security
-
-    $ValidCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2[]](Get-ChildItem 'Cert:\CurrentUser\My')
-    Write-Host "### choose from certs ###`n"
-    for ($i=0;$i -lt $ValidCerts.Count;$i++) {
-        write-host "$i`t$(($ValidCerts[$i].DnsnameList.unicode -join ':'))`t($($ValidCerts[$i].SubjectName.Name))"
+    $FilteredCerts = @()
+    if(! $All) {
+        # Ignore expired certs and filter by FriendlyName
+        $ValidCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2[]](Get-ChildItem 'Cert:\CurrentUser\My' | Where-Object {$_.NotAfter -gt (get-date)})
+        for ($i=0;$i -lt $ValidCerts.Count;$i++) {
+            if ($ValidCerts[$i].FriendlyName -ilike $CertFilterString) {
+                $FilteredCerts += $ValidCerts[$i] }
+        }
     }
-    $CertIndex = read-host -prompt "select certificate number"
-    $cert = $ValidCerts[$CertIndex]
-    #$Cert = [System.Security.Cryptography.X509Certificates.X509Certificate2UI]::SelectFromCollection($ValidCerts, 'Choose a certificate', 'Choose a certificate', 0)
+    else {
+        # Return all certs, regardless of expiration date or FriendlyName, called by -All parameter
+        $FilteredCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2[]](Get-ChildItem 'Cert:\CurrentUser\My')
+    }
+    Write-Host "### Choose From Certs ###`n"
+    for ($i=0;$i -lt $FilteredCerts.Count;$i++) {
+        write-host "$i`t$(($FilteredCerts[$i].FriendlyName))`t($($FilteredCerts[$i].SubjectName.Name))" 
+    }
+    $CertIndex = read-host -prompt "Select certificate number"
+    $cert = $FilteredCerts[$CertIndex]
 
     $Pin = Read-Host "Enter your PIN: " -AsSecureString
 
